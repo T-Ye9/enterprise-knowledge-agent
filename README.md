@@ -1,140 +1,112 @@
-# Enterprise Knowledge Agent（企业知识库智能助手）
+# Enterprise Knowledge Agent
 
-## Stage 16：Deployment Readiness
+**RAG + LangGraph + Tool Calling 企业知识库智能助手**
 
-已选本地部署方案：Railway 后端（至少 1GiB）与 Render 静态前端；尚未进行外部部署。方案比较与上线清单见
-[stage-16-deployment.md](docs/stages/stage-16-deployment.md)。
-Railway 首次部署操作与全部环境变量见 [RAILWAY_DEPLOY.md](docs/RAILWAY_DEPLOY.md)。
-生产配置模板为 `.env.production.example`，不要覆盖现有 .env 密钥。
-生产模式启动时检查密钥、明确 CORS 和可写存储目录；公开 Demo 关闭上传，并通过 `BOOTSTRAP_DEMO_KNOWLEDGE_BASE=true` 在启动时重建两份预置公开 PDF 的知识库。
-前端构建需要同时设置 VITE_ALLOW_DOCUMENT_UPLOAD=false，隐藏上传入口；后端仍独立拒绝上传。
-后端生产环境的 `/chat` 与 `/chat/stream` 共用每 60 秒 10 次的全局限流，超过返回 429 和 `Retry-After`。额度保存在单 worker 内存中，进程重启会重置。
+面向企业 PDF 的本地 AI 应用作品集：用户可以查询文档制度、连续追问，也可以让 Agent 完成四则运算。系统通过检索片段为回答提供可核对的文件名与页码，并提供 React 聊天界面、SSE 流式输出和可重复的评测。
 
-```powershell
-# 项目根目录：部署配置专项测试，不调用真实 LLM
-.\.venv\Scripts\python.exe -m unittest discover -s tests -p test_deployment.py -v
-# 生产启动入口，先设置模板中的实际环境变量；PORT 默认 8000
-.\.venv\Scripts\python.exe -m app.server
+## Demo 状态
+
+**Local Demo / Deployment Ready。** 已完成本地前后端和生产 Docker 容器验收；尚无经过验证的公开 Demo URL，因此不提供 Live Demo 链接。知识库示例是两份自行生成的虚构 PDF：[企业制度](samples/demo-company-policy.pdf)、[Project Cedar 制度](samples/web-demo-policy.pdf)。
+
+## Core Features
+
+- PDF 逐页解析、切块、本地 embedding、Qdrant 向量检索和独立 RAG 问答。
+- LangGraph Agent 通过原生 Tool Calling 自主选择直接回答、`calculator` 或 `search_knowledge_base`。
+- 知识库答案的文档和页码来自检索 metadata；普通聊天与纯计算没有文档引用。
+- React + TypeScript Chat UI、SSE 增量输出、短期多轮会话、加载和错误状态。
+- 启动时可从公开 PDF 自动重建 Demo 知识库；含后端、浏览器与 Docker 验收。
+
+## Architecture
+
+```mermaid
+flowchart LR
+    U[User] --> W[React UI]
+    W -->|POST /chat or /chat/stream| A[FastAPI]
+    A --> G[LangGraph Agent]
+    G -->|decision and answer generation| L[DeepSeek LLM]
+    G -->|calculator| C[Python calculator]
+    G -->|search_knowledge_base| K[Knowledge search tool]
+    K --> R[Query embedding and Top-K retrieval]
+    R --> V[(Local Qdrant)]
+    V --> R
+    D[Public demo PDFs] --> P[pypdf pages and chunks]
+    P --> E[FastEmbed local ONNX]
+    E --> V
+    C --> G
+    R --> G
+    L --> G
+    G -->|final answer| S[Validate citations against retrieved metadata]
+    S --> A
+    A -->|answer and sources| W
 ```
 
-单实例、单 worker；此 Demo 不挂持久卷，KNOWLEDGE_DB_PATH 与 EMBEDDING_CACHE_DIR 指向容器内可写绝对路径。
-同源 Compose 默认 /api；静态托管前端需在构建时设置实际 HTTPS VITE_API_URL，并在后端 CORS_ORIGINS 填准确前端 origin。
-本机验证：后端 109 项测试通过；生产 Docker 镜像已构建，容器内依赖检查和 `/health` 启动检查通过。Railway 中手动设置健康检查路径 `/health`，启动超时 300 秒；新的 Railway 服务已不支持旧的 `railway.json` 配置方式。
-`samples/*.json` 与 `evaluation/reports/` 是验收脚本生成的本地结果，不提交；测试源码、评测数据集和两份公开 PDF 保留在仓库。
+PDF 入库链和用户问答链分开：前者将解析、切块、embedding 后的文档存入 Qdrant；后者由知识工具检索证据并返回 Agent，LLM 再生成回答。独立 `app/rag.py` 复用检索模块，但 Agent 的知识工具**没有直接调用** `run_rag()`。
 
-## Stage 15：Docker Compose 启动
+## RAG Pipeline
 
-需要已启动的 Docker Engine 和 Docker Compose v2（Windows 使用 Docker Desktop 的 Linux containers）。
-在项目根目录操作；首次使用复制 .env.example 为 .env 并填写 DeepSeek key，已有 .env 请保留。
+`PDF → pypdf 逐页解析 → 每页切块 → 来源 metadata → FastEmbed embedding → 本地 Qdrant → 相似度检索 → Top-K 片段 → LLM 上下文 → 回答`
+
+每个 chunk 保留 `source`（文件名）、`page_number` 和 `chunk_id`；默认大小 500 字符、重叠 50 字符，默认 `Top-K=3`。向量库保存正文和 metadata。模型可在知识回答中选择 `[chunk_id]`，但 `app/citations.py` 只接受真实知识工具结果中的 ID，再从对应 metadata 生成去重的 `{document, page}`。这能拦截编造的引用标记，不能单靠引用验证证明回答完全正确；资料不足时提示词要求明确说明。
+
+## Agent Workflow
+
+```mermaid
+flowchart TD
+    Q[User query and session history] --> N[agent node: LLM with tools and tool_choice auto]
+    N --> D{LLM returned tool_calls?}
+    D -->|No| F[Validate answer and citations]
+    F --> X[END: answer and sources]
+    D -->|Yes| T[tools node: validate arguments and execute Python function]
+    T --> M[Append Tool Result with matching tool_call_id]
+    M --> N
+```
+
+`AgentState` 保存消息、工具记录、调用次数、执行路径、最终回答和来源。LangGraph 的 `START → agent`、条件边 `agent → tools/END`、`tools → agent` 构成闭环。是否调用工具取决于 LLM 返回的 `tool_calls`，不是程序按关键词写 `if/else`。单轮最多 4 次 LLM 调用，每次工具节点最多执行 8 个工具调用，另有图递归上限。`InMemorySaver` 按 `session_id` 保存同一进程的会话。
+
+## Tech Stack
+
+| Layer | Current implementation |
+| --- | --- |
+| Frontend | React 19、TypeScript、Vite 8 |
+| HTTP API | FastAPI、Pydantic、Uvicorn |
+| Agent / LLM | LangGraph、DeepSeek API（通过 OpenAI Python SDK 兼容接口） |
+| Tools | Python `calculator`、`search_knowledge_base`，原生 function schema |
+| PDF / chunking | pypdf、逐页字符窗口 |
+| Embedding | FastEmbed + 本地 ONNX `BAAI/bge-small-zh-v1.5`（512 维） |
+| Vector storage | Qdrant Client 本地模式、Cosine 相似度 |
+| Streaming / memory | SSE、LangGraph `InMemorySaver` |
+| Tests / container | `unittest`、Playwright、Docker / Compose |
+
+## Project Structure
+
+```text
+app/             FastAPI、Agent、工具、PDF/RAG、会话与流式逻辑
+frontend/        React UI、API 客户端和 Playwright 浏览器测试
+tests/           后端单元测试与 API 测试
+evaluation/      19 条公开问题、确定性评分和运行入口
+samples/         两份公开虚构 PDF 与验收脚本
+docs/stages/      各阶段实现和真实验收记录
+```
+
+## Quick Start（Windows PowerShell）
+
+需要 Git、Python（本地验收使用 3.10.6；生产容器使用 3.11）和 Node.js/npm。首次 embedding 需要下载模型；真实 DeepSeek 调用会消耗自己的 API 额度。
 
 ```powershell
-# 仅在尚无 .env 时执行，随后在本地编辑密钥
+git clone https://github.com/T-Ye9/enterprise-knowledge-agent.git
+cd enterprise-knowledge-agent
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.lock.txt
 Copy-Item .env.example .env
-docker compose build
-docker compose up -d --wait
-docker compose ps
 ```
 
-打开 http://127.0.0.1:8080；API 文档 http://127.0.0.1:8001/docs。
-前端通过同源 /api 代理，不需要修改本地开发用的 frontend/.env.local。
-后端密钥通过运行时 env_file 注入；不复制进镜像，也不发送给前端。
-端口可在根目录 .env 设置 WEB_PORT、BACKEND_PORT 后重新启动，默认 8080/8001。
-
-第一次处理 PDF 需下载 embedding 模型，可以先预热并等待完成：
+只在**本机**的 `.env` 中把 `DEEPSEEK_API_KEY=` 填为自己的密钥，并增加一行 `BOOTSTRAP_DEMO_KNOWLEDGE_BASE=true`，让首次启动从两份公开 PDF 建库。不要提交 `.env`。第一个终端启动后端：
 
 ```powershell
-docker compose exec backend python -c "from app.embeddings import Embedder; Embedder()"
-# 需本地已有项目 Python 环境；脚本测试真实 LLM 并上传公开样例
-.\.venv\Scripts\python.exe samples/verify_docker.py
-docker compose logs --tail 50
-docker compose down
-```
-
-向量库和模型缓存保存在 Docker named volumes，普通 down 不删除；不要使用 down -v，除非确实要清空数据。
-容器知识库与本机 data/vector-db 独立，首次为空，可从页面上传 samples/web-demo-policy.pdf。
-多轮会话仍只在后端进程内保存，重启会丢失。
-不要将会展开运行时密钥的 docker compose config 输出公开。
-
-**验证状态：前后端镜像已实际构建；`docker compose up -d --wait` 和 `samples/verify_docker.py` 已通过。**
-具体设计与阶段记录见 [stage-15-docker.md](docs/stages/stage-15-docker.md)。
-
-## Stage 14：Engineering Reliability
-
-增加安全的基础日志、HTTP/SSE 共用错误分类、配置检查及关键故障测试。
-日志不记录用户问题、回答、工具参数、检索正文、文件名或 API Key。
-PDF 无效/无文本与模型或数据库入库失败分别处理；异常不会被静默忽略。
-没有新增依赖，启动方式不变；已经运行的后端需重启才能加载修改。
-
-```powershell
-# 项目根目录：所有后端测试（真实 LLM 测试需要现有 .env）
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
-# 只运行故障测试，不调用真实 LLM
-.\.venv\Scripts\python.exe -m unittest discover -s tests -p test_reliability.py -v
-# frontend 目录，先启动 npm run dev
-npm run build
-npm run test:e2e -- e2e/reliability.spec.ts e2e/stream.spec.ts
-```
-
-本阶段验证：95 项后端测试、8 项浏览器测试及生产构建通过。
-详细说明见 [stage-14-reliability.md](docs/stages/stage-14-reliability.md)。
-
-## Stage 13：RAG / Agent Evaluation
-
-19 条公开样例问题，分别评估直接检索、真实 Agent 和已有记录的确定性重新评分。
-复用现有 ingestion、retrieval 和 Agent，在临时知识库运行；不修改服务数据，不新增依赖。
-无需启动前后端，在项目根目录执行：
-
-```powershell
-# 只检索，不调用 LLM；首次使用需要下载现有 embedding 模型
-.\.venv\Scripts\python.exe -m evaluation.run --mode retrieval --output evaluation/reports/my-retrieval
-# 真实 Agent，读取现有 .env 中的 DeepSeek 配置
-.\.venv\Scripts\python.exe -m evaluation.run --mode agent --output evaluation/reports/my-agent
-# 重评已保存的真实记录，不调用 LLM 或重新检索
-.\.venv\Scripts\python.exe -m evaluation.run --mode replay --input evaluation/reports/agent.json --output evaluation/reports/my-replay
-.\.venv\Scripts\python.exe -m unittest tests.test_evaluation -v
-```
-
-输出同名 JSON 完整记录和 Markdown 报告。退出码 1 表示至少一项质量检查失败，仍会生成报告。
-当前直接检索证据覆盖 10/11；Agent 工具选择 19/19，答案依据规则 11/11，拒答规则 3/3。
-这些是小型开发集的规则检查，不是系统在所有问题上都可靠的证明。
-运行后生成的报告保存在被 Git 忽略的 `evaluation/reports/`；
-方法、失败案例与评分修正见 [stage-13-evaluation.md](docs/stages/stage-13-evaluation.md)。
-
-## Stage 12：Streaming Response
-
-页面默认通过 `POST /chat/stream` 的 SSE 事件逐步显示真实模型输出。
-工具参数完整拼接后才执行；完成时显示核对后的回答和 Sources。
-原有 `POST /chat` 保留，可与流式入口使用同一 session_id。
-没有新增依赖或 WebSocket。
-
-启动仍与阶段 11 相同：项目根目录启动 uvicorn，frontend 目录运行 npm run dev。
-打开 http://127.0.0.1:5173 发送问题，观察文字逐步出现；工具阶段显示工具名。
-
-```powershell
-# 项目根目录
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
-# frontend，两端服务已启动
-npm run build
-npm run test:e2e
-```
-
-流式完成、错误、EOF、中文分片与工具协议说明见
-[stage-12-streaming.md](docs/stages/stage-12-streaming.md)。
-真实流式验收记录见 `samples/streaming_examples.json`。
-
-## Stage 11：React Web UI
-
-简洁的 React + TypeScript + Vite 页面，包含聊天、来源、loading、错误、连续会话和 PDF 上传。
-后端上传复用 index_pdf：解析 → 切分 → embedding → Qdrant。原 Agent 和检索流程保持不变。
-
-终端 1，在项目根目录启动后端：
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe -m uvicorn app.api:app --host 127.0.0.1 --port 8000
 ```
 
-终端 2，启动前端：
+第二个终端从仓库根目录启动前端：
 
 ```powershell
 cd frontend
@@ -142,256 +114,99 @@ npm ci
 npm run dev
 ```
 
-打开 http://127.0.0.1:5173 。已有测试知识库可以直接提问；也可上传公开测试文件
-`samples/web-demo-policy.pdf`，问“Project Cedar 每月健康补贴是多少元？”，应回答 731 元并展示第 1 页来源。
-前端 API 地址在 `frontend/.env.local` 配置 `VITE_API_URL`，模板见 `frontend/.env.example`。
-后端 `.env` 可配置 `CORS_ORIGINS`，默认允许 localhost / 127.0.0.1 的 5173 端口；修改后重启服务。
-API Key 只放在后端 `.env`，不放进 VITE_* 变量。
-使用单 worker，前后端已启动时直接访问，不要重复启动占用同一端口。
+访问 <http://127.0.0.1:5173>；API 文档在 <http://127.0.0.1:8000/docs>。试问“你好”“帮我计算 123 * 456”或“员工出差返回后多少个工作日内提交报销材料？”。前端默认连接本地后端；若要调整，复制 [前端环境模板](frontend/.env.example) 为 `frontend/.env.local` 并设置 `VITE_API_URL`。
 
-验收：根目录运行 Python 测试；两个服务运行期间在 frontend 中运行浏览器测试：
+复现检查：仓库根目录执行后端测试；切到 `frontend/` 后执行前端检查。浏览器测试要求本地前端服务仍在运行，且已安装 Microsoft Edge（现有 Playwright 配置使用 `msedge`）。
 
 ```powershell
-# 项目根目录
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
-# frontend 目录
+cd frontend
 npm run build
 npm run test:e2e
 ```
 
-浏览器测试默认使用本机 Microsoft Edge；完整说明见 [stage-11-react.md](docs/stages/stage-11-react.md)。
+Docker 的已验收命令是 `docker compose build` 与 `docker compose up -d --wait`，详见 [Stage 15](docs/stages/stage-15-docker.md)。Compose 读取本地 `.env`；站点默认 <http://127.0.0.1:8080>，后端默认 <http://127.0.0.1:8001>。
 
-## Stage 10：可验证的文档来源
+## Environment Variables
 
-`POST /chat` 新增 `sources: [{"document":"demo-company-policy.pdf","page":2}]`。
-Python 将回答的 chunk 引用与真实知识检索结果核对，再从 metadata 提取文件名和页码，同页去重。
-普通聊天和计算返回 `sources: []`；追问可引用历史检索证据。原有响应字段保留。
+配置模板：[后端开发](.env.example)、[后端生产](.env.production.example)、[前端](frontend/.env.example)。这里不包含真实密钥。
 
-```powershell
-.\.venv\Scripts\python.exe -m uvicorn app.api:app --host 127.0.0.1 --port 8000
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe samples/verify_citations.py
+| Variable | Required | Description |
+| --- | --- | --- |
+| `DEEPSEEK_API_KEY` | 是 | 仅后端；示例 `YOUR_DEEPSEEK_API_KEY`，绝不可提交 Git |
+| `DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL` | 否 | 默认 `https://api.deepseek.com` / `deepseek-flash` |
+| `BOOTSTRAP_DEMO_KNOWLEDGE_BASE` | Demo 自动建库时设 `true` | 启动时重建两份公开 PDF；默认 `false` |
+| `APP_ENV` / `ALLOW_DOCUMENT_UPLOAD` | 生产环境需明确配置 | 公开 Demo 用 `production` / `false`；本地模板为 `development` / `true` |
+| `CORS_ORIGINS` | 跨域生产部署需配置 | 逗号分隔的 HTTPS 前端 origin；本地模板允许 5173 端口 |
+| `KNOWLEDGE_DB_PATH` / `EMBEDDING_CACHE_DIR` | 生产环境必填 | 可写绝对路径；本地默认 `data/` 与 `.cache/` |
+| `VITE_API_URL` / `VITE_ALLOW_DOCUMENT_UPLOAD` | 按前端环境设置 | 前端构建变量；公开 Demo 指向后端并关闭上传，不可放密钥 |
+| `PORT` | 平台自动提供 | 生产入口 `app.server` 读取并监听 `0.0.0.0`；本地默认 8000 |
+
+## API Examples
+
+`GET /health` 返回：
+
+```json
+{"status":"ok"}
 ```
 
-验收脚本使用自己的 TestClient 进程，无需先启动服务。
-说明见 [stage-10-citations.md](docs/stages/stage-10-citations.md)，真实结果见 `samples/citation_examples.json`。
+`POST /chat` 接收非空、最多 4000 字符的 `message`，可选 UUID `session_id`；省略时新建会话：
 
-## Stage 09：短期多轮会话
+```http
+POST /chat
+Content-Type: application/json
 
-使用 LangGraph InMemorySaver，在单个服务进程中按 session_id 保存消息和工具证据。
-POST /chat 不传 session_id 会新建会话并返回 ID；下一轮带回同一 ID。
-POST /sessions 显式新建会话；DELETE /sessions/{session_id} 删除历史和 ID。
-服务重启会丢失会话；使用单 worker。没有增加依赖、数据库或长期记忆。
-
-```powershell
-.\.venv\Scripts\python.exe -m uvicorn app.api:app --host 127.0.0.1 --port 8000
-# 以下脚本在自己的进程中验收，无需先启动服务。
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe samples/verify_conversation.py
+{"message":"帮我计算 123 * 456"}
 ```
 
-访问 http://127.0.0.1:8000/docs，发送 `{"message":"出差回来后多久提交报销？"}`，
-复制响应 session_id，再发送 `{"message":"那要提交哪些材料？","session_id":"复制的ID"}`。
-详细说明见 [stage-09-conversation-memory.md](docs/stages/stage-09-conversation-memory.md)，
-真实三轮记录见 `samples/conversation_examples.json`。下方是各阶段历史说明。
+响应**结构示例**（ID、模型措辞及参数顺序会变化）：
 
-## Stage 08：LangGraph Agent + 最小 FastAPI 层
-
-终端及 HTTP 都调用两个节点的单 Agent：agent → tools → agent，或 agent → END。
-复用原有工具和 RAG，最多 4 次 LLM 调用，返回执行路径和工具 trace。
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe app/main.py
-.\.venv\Scripts\python.exe -m uvicorn app.api:app --host 127.0.0.1 --port 8000
+```json
+{
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "answer": "123 × 456 = 56088",
+  "path": ["START", "agent", "tools", "agent", "END"],
+  "tool_calls": [{"id": "call_example", "name": "calculator", "arguments": "{\"a\":123,\"b\":456,\"operation\":\"multiply\"}", "result": {"result": 56088}}],
+  "llm_calls": 2,
+  "sources": []
+}
 ```
 
-访问 `/docs` 验证 `POST /chat`，请求为 `{"message":"帮我计算 123 * 456"}`。
-响应包含 answer、path、tool_calls、llm_calls；`GET /health` 返回 status=ok。
-使用单 worker；不要同时运行其它访问同一路径的向量库命令。
-真实验收脚本：`samples/verify_agent.py`，完整记录：`samples/agent_examples.json`。
-说明见 [stage-08-langgraph-agent.md](docs/stages/stage-08-langgraph-agent.md)。
+`POST /chat/stream` 使用相同 JSON 请求体，返回 `text/event-stream`。事件可能包括 `session`、`reset`、`delta`、`tool_start`、`tool_end`，最后以 `done` 或 `error` 结束。`done` 包含 `session_id`、`answer`、`sources`、`path`、`tool_calls`、`llm_calls`。知识回答的 `sources` 形如 `[{"document":"demo-company-policy.pdf","page":2}]`，页码来自实际检索 metadata。
 
-## Stage 07：Knowledge Search Tool
+## Evaluation（Stage 17 实测）
 
-原生 Tool Calling 同时提供 calculator 和 search_knowledge_base，由 LLM 自主选择。
-企业检索复用已有 search_query()，返回正文及完整来源，再由外层 LLM 回答。
-资料不足要求明确拒答，不使用 LangGraph，不新增依赖。
+公开 [评测数据集](evaluation/dataset.json) 共 **19 条**：知识 8、多 chunk 2、资料不足 3、计算 3、普通聊天 2、混合工具 1。详情见 [最终 QA 报告](docs/stages/stage-17-final-qa.md)。
 
-```powershell
-.\.venv\Scripts\python.exe app/main.py
-.\.venv\Scripts\python.exe -m unittest discover -s tests -p test_knowledge_tool.py -v
-.\.venv\Scripts\python.exe samples/verify_knowledge_tool.py
-```
+| Check | Actual result |
+| --- | --- |
+| 后端单元/API 测试 | 109/109 通过 |
+| 19 条评测整体 | 直接检索 18/19；Agent 报告 18/19，均因同一 `M02` 直接检索附加检查 |
+| 工具选择 / Agent 完成 | 各 19/19 |
+| 直接 Top-3 检索至少命中一个预期来源 | 11/11 |
+| 直接检索覆盖全部来源和证据 | 各 10/11 |
+| Agent 来源覆盖 / 引用核对 / 答案依据规则 | 各 11/11 |
+| 资料不足拒答 / 计算结果与答案 | 3/3；各 4/4 |
+| 浏览器端到端测试 | 11 通过、2 条条件跳过；公开 Demo 模式另测 1 条通过 |
 
-真实验收记录见 `samples/knowledge_tool_examples.json`。
-详细说明见 [stage-07-knowledge-tool.md](docs/stages/stage-07-knowledge-tool.md)。
+`M02` 同时询问三处事实，单次 Top-3 检索漏掉工作时间片段；Agent 在该次评测中多次检索补齐。评测脚本按设计返回非零退出码，报告仍保存在被忽略的 `evaluation/reports/`。这是**两份短 PDF 的作品集级开发集**，不是生产质量证明；确定性规则也不能证明所有回答都没有幻觉。
 
-## Stage 06：基础 RAG Pipeline
+## Key Engineering Decisions
 
-复用已有向量库：问题 → 检索 → Top-K context → LLM → 回答及来源。
-不重新入库；资料不足要求明确拒答。API Key 继续读取 .env。
+1. **先实现 Tool Calling，再引入 LangGraph。** 两个工具仍是真实 Python 函数；图只负责节点、条件路由与循环上限，便于定位选择、参数与执行的故障。
+2. **将知识检索暴露为 Tool。** Agent 分别处理聊天、计算和企业事实；知识工具复用 embedding 与检索模块，返回证据而非重复生成答案。
+3. **从工具证据生成引用。** 模型选择 `[chunk_id]`，代码从真实 Tool Result metadata 提取文件与页码并去重；事实正确性仍需评测和人工抽查。
+4. **公开 Demo 自动重建知识库。** 启用 bootstrap 后，内置虚构 PDF 随服务启动重新入库，适合无持久卷演示；首次启动还需下载 ONNX 模型。
+5. **选择 SSE 与进程内短期记忆。** 当前只需服务器单向推送回答；`InMemorySaver` 简化低并发演示，但重启会清空会话。
 
-```powershell
-.\.venv\Scripts\python.exe -m app.rag '出差回来后，多久之内要提交报销？' --top-k 3
-.\.venv\Scripts\python.exe -m unittest discover -s tests -p test_rag.py -v
-.\.venv\Scripts\python.exe samples/verify_rag.py
-```
+## Known Limitations & Future Improvements
 
-真实问答会将检索正文发送到 LLM API，消耗额度。公开示例见 `samples/rag_examples.json`。
-输出包含 answer、retrieved_chunks、context 和 sources，保留全部来源 metadata。
-普通终端聊天仍使用 `app/main.py`，与 RAG 入口分离。
-详细说明见 [stage-06-rag.md](docs/stages/stage-06-rag.md)。
+当前只支持文本型、未加密 PDF，没有 OCR；默认 Top-3 在 `M02` 多事实问题中有明确漏失。Qdrant 本地模式和单进程内存会话面向低并发作品集演示；没有认证、租户隔离或企业级权限。公开部署尚未验收，暂不宣称线上可用。
 
-## Stage 05：本地 Embedding 与向量数据库
+后续可研究混合检索与 reranking、扩大含干扰项的独立评测集、持久化会话与向量存储、加入身份和文档权限、加强可观测性。这些均未包含在当前实现中。
 
-使用中文 FastEmbed 模型和 Qdrant 本地模式，无需 API Key、数据库服务或 Docker。
-首次下载约 90 MB 模型，在 CPU 生成向量。检索只返回 chunks，不生成答案。
+## Screenshots & Project Notes
 
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m app.knowledge_base index samples/demo-company-policy.pdf --chunk-size 80 --overlap 20
-.\.venv\Scripts\python.exe -m app.knowledge_base search '出差回来后，多久之内要提交报销？' --top-k 2
-```
+仓库目前**没有已提交的 UI 截图**，因此不放失效图片。正式展示前建议人工截取并检查脱敏：① Chat UI；② 知识问答与真实来源页码；③ Agent 工具调用记录或本页架构图。开发过程见 [docs/stages](docs/stages/)；早期 Tool Calling 实验记录见 [EXECUTION_REPORT.md](EXECUTION_REPORT.md)。简历表达和面试提纲见 [Portfolio Summary](docs/PORTFOLIO_SUMMARY.md)。
 
-Top-K 默认 3，可配置。结果包括分数、正文和全部来源 metadata。
-数据库位于 `data/vector-db/`，模型缓存位于 `.cache/embeddings/`，均被 Git 忽略。
-真实模型验收脚本：`samples/verify_vector_search.py`。
-详细记录见 [stage-05-embedding-vector-db.md](docs/stages/stage-05-embedding-vector-db.md)。
-
-## Stage 04：Document Chunking
-
-按页进行字符滑动窗口切分，默认最多 500 字符、重叠 50 字符。
-每块保留文件名和页码，并增加 chunk ID 与字符位置。无需新增依赖。
-
-```powershell
-.\.venv\Scripts\python.exe -m app.chunking samples/demo-company-policy.pdf --chunk-size 80 --overlap 20
-.\.venv\Scripts\python.exe -m unittest discover -s tests -p test_chunking.py -v
-```
-
-示例参数将公开样本切为 3 块，实际结果见 `samples/chunk_examples.json`。
-阶段说明见 [stage-04-chunking.md](docs/stages/stage-04-chunking.md)。
-本阶段没有实现 Embedding、Vector DB 或 RAG。
-
-## Stage 03：独立 PDF 文档解析
-
-新增本地逐页文本提取及页码元数据，不调用 LLM，不实现 RAG。
-原有 Tool Calling 功能继续保留，下文的对话运行说明仍适用。
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m app.document_processing samples/demo-company-policy.pdf
-.\.venv\Scripts\python.exe -m unittest discover -s tests -p test_document_processing.py -v
-```
-
-公开样本为自行生成的虚构制度。真实企业文件放 `samples/private/`，
-其解析输出放 `output/document-processing/`；二者均被 Git 忽略。
-文本型 PDF 可提取文本，扫描件暂不支持 OCR。
-详细记录见 [stage-03-document-parsing.md](docs/stages/stage-03-document-parsing.md)。
-
-以下保留 Stage 02 的 Tool Calling 学习记录；当前项目已包含后续阶段的功能。
-
-## 环境和文件
-
-Python 3.10 或更新版本；本机使用 Python 3.10.6。
-
-| 文件 | 职责 |
-|---|---|
-| app/main.py | 读取配置、终端输入、模型请求、工具执行和流程日志 |
-| app/tools.py | calculator 真实函数和工具 JSON Schema |
-| tests/test_tools.py | 离线四则运算、参数错误和除零测试 |
-| tests/test_flow.py | 用模拟响应验证调用 ID、工具结果传递、直接回答和轮次上限 |
-| tests/test_live_api.py | 三项真实 LLM 验收，缺少密钥时跳过 |
-| .env | 本地密钥和 API 配置，不提交 |
-| .env.example | 不含真实密钥的配置示例 |
-| requirements.txt | 当前 Python 后端的直接依赖 |
-| .gitignore | 忽略配置、虚拟环境和缓存 |
-
-## 配置与运行
-
-在 PowerShell 中进入项目；新克隆仓库时先创建虚拟环境，再安装依赖：
-
-```powershell
-# 先进入克隆后的项目根目录
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-```
-
-已有 `.venv` 时跳过创建命令。
-
-在本地 .env 填写 DeepSeek 开放平台的 API Key，不要在聊天中发送密钥：
-
-```dotenv
-DEEPSEEK_API_KEY=在这里填写真实密钥
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=deepseek-flash
-```
-
-openai 是客户端包名；请求发往 DeepSeek，需要 DeepSeek 密钥。
-程序按项目根目录定位 .env；缺少密钥时明确报错。API 请求消耗账户额度。
-
-运行，无需激活虚拟环境：
-
-```powershell
-.\.venv\Scripts\python.exe app/main.py
-```
-
-输入一个问题后，程序打印完整流程并退出。再次运行可以输入另一个问题。
-
-## Tool Calling 流程
-
-1. Python 发送用户输入、系统提示和工具 Schema。
-2. tool_choice="auto" 允许 LLM 直接回答或请求工具，不强制选择 calculator。
-3. 请求工具时，LLM 返回工具名、JSON 参数和调用 ID。
-4. Python 校验参数并执行 calculator(a, b, operation)。
-5. 保留模型的 assistant 调用消息，再添加 role="tool" 的结果消息。
-6. tool_call_id 对应调用 ID，重新请求 LLM 获得最终回答。
-
-Schema 是给模型的说明书，不是函数本身；实际执行的是 Python 函数。
-operation 支持 add、subtract、multiply、divide，不使用 eval()。
-计算错误也会作为工具结果返回模型。
-
-系统提示指导模型何时计算；程序不根据用户关键词选择工具。
-main.py 中的条件判断处理模型响应和工具名称；tools.py 中的条件判断执行运算。
-本阶段关闭思考模式、禁用自动重试，每次请求超时 60 秒，总计最多 4 轮请求。
-
-## 验收
-
-离线工具测试，不消耗 API 额度：
-
-```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -p test_tools.py -v
-.\.venv\Scripts\python.exe -m unittest discover -s tests -p test_flow.py -v
-```
-
-配置密钥后执行真实 API 测试，会消耗 API 额度：
-
-```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -p test_live_api.py -v
-```
-
-| 输入 | 预期工具行为 | Python 结果 |
-|---|---|---|
-| 帮我计算 123 * 456 | calculator，multiply | 56088 |
-| 帮我计算 999 + 888 | calculator，add | 1887 |
-| 你好，请介绍一下你自己。 | 无工具，直接回答 | 不执行工具 |
-
-日志依次展示 User Input、Tool Call Requested、Tool Name、Tool Arguments、
-Python Tool Result、Final Answer；有工具调用时显示调用 ID 和请求轮次。
-无工具时不打印工具名称、参数和 Python 结果。
-
-测试检查真实响应中的工具请求、参数、Python 结果以及最终回答。
-最终答案正确本身不能证明调用过工具。缺少密钥的 skipped 不代表真实测试通过。
-
-入口判断 if __name__ == "__main__" 保证直接运行文件时才启动终端输入。
-
-参考：[DeepSeek 接入说明](https://api-docs.deepseek.com/)、
-[Tool Calling](https://api-docs.deepseek.com/guides/tool_calls/)。
-
-## Linux 512MiB 资源验证
-
-已实际构建前后端容器并验证公开 Demo 冷启动、六次真实请求、SSE 来源展示与知识库重建。没有 OOM，但运行峰值为 499.89MiB（512MiB 的 97.6%），目前不推荐直接采用 Render Free；没有执行外部部署。
-
-详见 [验证报告](docs/stages/stage-16-512mb-validation.md)。`BOOTSTRAP_DEMO_KNOWLEDGE_BASE=true` 可在启动时复用 ingestion 初始化两份固定公开 PDF；默认关闭，不导入私有文件。API Key 仅通过后端运行时环境提供。
-
-后续 **1GiB Linux 验证**完成了 11 次真实请求、SSE、多轮和删库恢复；两轮测试实际观察最高内存 659.41MiB，余量 364.59MiB。建议作为低并发作品集 Demo 的起始配置，详见 [1GiB 验证报告](docs/stages/stage-16-1g-validation.md)。没有外部部署。
+仓库目前没有 `LICENSE`；代码公开可读不等于授予复用许可，是否采用许可证由维护者决定。
