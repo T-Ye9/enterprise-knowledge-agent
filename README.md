@@ -55,9 +55,8 @@ docker compose down
 多轮会话仍只在后端进程内保存，重启会丢失。
 不要将会展开运行时密钥的 docker compose config 输出公开。
 
-**验证状态：容器配置已准备，本机尚未安装/启动 Docker，实际镜像 build 和容器验收尚未完成。**
-已通过使用 /api 的本地前端构建及验收脚本语法检查。
-具体设计与待验证项目见 [stage-15-docker.md](docs/stages/stage-15-docker.md)。
+**验证状态：前后端镜像已实际构建；`docker compose up -d --wait` 和 `samples/verify_docker.py` 已通过。**
+具体设计与阶段记录见 [stage-15-docker.md](docs/stages/stage-15-docker.md)。
 
 ## Stage 14：Engineering Reliability
 
@@ -98,7 +97,7 @@ npm run test:e2e -- e2e/reliability.spec.ts e2e/stream.spec.ts
 输出同名 JSON 完整记录和 Markdown 报告。退出码 1 表示至少一项质量检查失败，仍会生成报告。
 当前直接检索证据覆盖 10/11；Agent 工具选择 19/19，答案依据规则 11/11，拒答规则 3/3。
 这些是小型开发集的规则检查，不是系统在所有问题上都可靠的证明。
-当前报告见 [agent-rescored.md](evaluation/reports/agent-rescored.md)，
+运行后生成的报告保存在被 Git 忽略的 `evaluation/reports/`；
 方法、失败案例与评分修正见 [stage-13-evaluation.md](docs/stages/stage-13-evaluation.md)。
 
 ## Stage 12：Streaming Response
@@ -290,8 +289,7 @@ Top-K 默认 3，可配置。结果包括分数、正文和全部来源 metadata
 文本型 PDF 可提取文本，扫描件暂不支持 OCR。
 详细记录见 [stage-03-document-parsing.md](docs/stages/stage-03-document-parsing.md)。
 
-学习 AI 应用开发的求职作品集项目。当前阶段：LLM + 原生 Tool Calling。
-只实现终端对话和 calculator，后续阶段尚未开始。
+以下保留 Stage 02 的 Tool Calling 学习记录；当前项目已包含后续阶段的功能。
 
 ## 环境和文件
 
@@ -306,23 +304,20 @@ Python 3.10 或更新版本；本机使用 Python 3.10.6。
 | tests/test_live_api.py | 三项真实 LLM 验收，缺少密钥时跳过 |
 | .env | 本地密钥和 API 配置，不提交 |
 | .env.example | 不含真实密钥的配置示例 |
-| requirements.txt | openai、python-dotenv 两个直接依赖 |
+| requirements.txt | 当前 Python 后端的直接依赖 |
 | .gitignore | 忽略配置、虚拟环境和缓存 |
 
 ## 配置与运行
 
-在 PowerShell 中进入项目并安装依赖：
+在 PowerShell 中进入项目；新克隆仓库时先创建虚拟环境，再安装依赖：
 
 ```powershell
 # 先进入克隆后的项目根目录
+python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-已有 .venv 无需重建；必要时可以使用已安装的 Python 创建：
-
-```powershell
-python -m venv .venv
-```
+已有 `.venv` 时跳过创建命令。
 
 在本地 .env 填写 DeepSeek 开放平台的 API Key，不要在聊天中发送密钥：
 

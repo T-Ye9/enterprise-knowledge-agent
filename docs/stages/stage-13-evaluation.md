@@ -100,7 +100,7 @@ replay 不重新检索或调用 LLM，只对保存的原始结果应用当前评
 真实运行环境：Python 3.10.6，openai 2.54.0，langgraph 1.2.11，fastembed 0.7.4，qdrant-client 1.19.1，pypdf 6.19.0。
 Embedding 为 BAAI/bge-small-zh-v1.5（512 维），LLM 为 deepseek-flash。
 
-最终报告 [agent-rescored.md](../../evaluation/reports/agent-rescored.md) 对同一批 19 条真实 Agent 记录使用评分器 v2 重新评分，没有重跑模型来挑选更好的回答。
+当时生成的本地报告 `evaluation/reports/agent-rescored.md` 对同一批 19 条真实 Agent 记录使用评分器 v2 重新评分，没有重跑模型来挑选更好的回答。`evaluation/reports/` 被 Git 忽略，克隆仓库后须自行运行评测生成报告。
 
 | 检查 | 结果 |
 | --- | --- |
@@ -119,12 +119,12 @@ Embedding 为 BAAI/bge-small-zh-v1.5（512 维），LLM 为 deepseek-flash。
 ### 保留的质量失败：M02
 
 M02 同时询问工作时间、报销期限和 Cedar 补贴。直接 Top-3 检索取到两个 Cedar 块，遗漏工作时间证据，因此最终报告仍有失败，脚本返回 1。
-对照 [retrieval-top4.md](../../evaluation/reports/retrieval-top4.md) 显示：Top-K=4 让所有页都出现，但新增的是休假片段，仍没有工作时间证据，证据覆盖依旧 10/11。不能因为页码覆盖提高就宣称问题已解决。
+当时的本地对照报告 `evaluation/reports/retrieval-top4.md` 显示：Top-K=4 让所有页都出现，但新增的是休假片段，仍没有工作时间证据，证据覆盖依旧 10/11。不能因为页码覆盖提高就宣称问题已解决。
 同一案例中真实 Agent 分别搜索三个主题，最终取得并引用了所需证据；这是已有 Agent 的执行表现，本阶段没有新增查询拆分功能。
 
 ### 评分器误判及修正
 
-初始 [agent.md](../../evaluation/reports/agent.md) 的拒答检查为 0/3：评分器 v1 一律禁止未知问题回答中出现数量。
+当时的本地初始报告 `evaluation/reports/agent.md` 的拒答检查为 0/3：评分器 v1 一律禁止未知问题回答中出现数量。
 检查原始回答后发现模型确实拒答，但为了说明资料范围，引用了真实文档中的 731 元补贴。因此这是评分规则的误判，不能通过改写模型回答掩盖。
 v2 允许实际引用证据中出现的数量，同时测试无依据的 5000 元、80% 和没有 citation 的数量不能通过。
 原始报告保留；agent-rescored.json 标明 recorded_mode、旧/新 scorer version 和原始时间。相同原始记录重复评分结果一致，测试明确禁止 replay 调用 create_client()。
