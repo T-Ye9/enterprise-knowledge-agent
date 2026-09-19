@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "description": "公开虚构 PDF 的小型开发集；规则检查不是完整语义真实性证明。",
+  "corpus": ["demo-company-policy.pdf", "web-demo-policy.pdf"],
+  "config": {"chunk_size": 80, "overlap": 20, "top_k": 3},
+  "cases": [
+    {"id":"K01","category":"knowledge","question":"公司的工作日是周几到周几？","expected_tools":["search_knowledge_base"],"facts":[{"document":"demo-company-policy.pdf","page":1,"quote":"周一至周五","answer_pattern":"周一.*周五"}]},
+    {"id":"K02","category":"knowledge","question":"公司每天几点上班、几点下班？","expected_tools":["search_knowledge_base"],"facts":[{"document":"demo-company-policy.pdf","page":1,"quote":"上午九点至下午六点","answer_pattern":"(?:九点|9[:：]00|9点|09[:：]00).*(?:六点|6[:：]00|6点|18[:：]00|18点)"}]},
+    {"id":"K03","category":"knowledge","question":"休假申请需要提前几个工作日提交？","expected_tools":["search_knowledge_base"],"facts":[{"document":"demo-company-policy.pdf","page":1,"quote":"提前三个工作日","answer_pattern":"(?:三|3)个工作日"}]},
+    {"id":"K04","category":"knowledge","question":"出差返回后多久必须提交报销？","expected_tools":["search_knowledge_base"],"facts":[{"document":"demo-company-policy.pdf","page":2,"quote":"返回后十个工作日内提交","answer_pattern":"(?:十|10)个工作日"}]},
+    {"id":"K05","category":"knowledge","question":"差旅报销需要哪些材料？","expected_tools":["search_knowledge_base"],"facts":[{"document":"demo-company-policy.pdf","page":2,"quote":"发票及费用说明","answer_pattern":"发票.*费用说明"}]},
+    {"id":"K06","category":"knowledge","question":"差旅需要事先由谁批准？","expected_tools":["search_knowledge_base"],"facts":[{"document":"demo-company-policy.pdf","page":2,"quote":"事先获得主管批准","answer_pattern":"主管.*批准|批准.*主管"}]},
+    {"id":"K07","category":"knowledge","question":"Project Cedar 每位员工每月健康补贴是多少元？","expected_tools":["search_knowledge_base"],"facts":[{"document":"web-demo-policy.pdf","page":1,"quote":"每位员工每月 731 元","answer_pattern":"731元"}]},
+    {"id":"K08","category":"knowledge","question":"Project Cedar 健康补贴材料需要在什么时候提交？","expected_tools":["search_knowledge_base"],"facts":[{"document":"web-demo-policy.pdf","page":1,"quote":"次月 5 日前","answer_pattern":"次月(?:5|五)日(?:之)?前|下(?:个)?月(?:5|五)(?:日|号)(?:之)?前"}]},
+    {"id":"M01","category":"multi_chunk","question":"请分别告诉我公司的工作时间和出差返回后的报销提交期限。","expected_tools":["search_knowledge_base"],"min_retrieved_chunks":2,"facts":[{"document":"demo-company-policy.pdf","page":1,"quote":"上午九点至下午六点","answer_pattern":"(?:九点|9[:：]00|9点|09[:：]00).*(?:六点|6[:：]00|6点|18[:：]00|18点)"},{"document":"demo-company-policy.pdf","page":2,"quote":"十个工作日内提交","answer_pattern":"(?:十|10)个工作日"}]},
+    {"id":"M02","category":"multi_chunk","question":"请同时概括公司工作时间、差旅报销提交期限和 Project Cedar 每月健康补贴金额。","expected_tools":["search_knowledge_base"],"min_retrieved_chunks":3,"facts":[{"document":"demo-company-policy.pdf","page":1,"quote":"上午九点至下午六点","answer_pattern":"(?:九点|9[:：]00|9点|09[:：]00).*(?:六点|6[:：]00|6点|18[:：]00|18点)"},{"document":"demo-company-policy.pdf","page":2,"quote":"十个工作日内提交","answer_pattern":"(?:十|10)个工作日"},{"document":"web-demo-policy.pdf","page":1,"quote":"每位员工每月 731 元","answer_pattern":"731元"}]},
+    {"id":"U01","category":"unsupported","question":"公司员工的年终奖固定为多少元？","expected_tools":["search_knowledge_base"],"refusal":true},
+    {"id":"U02","category":"unsupported","question":"公司实习生一年有多少天带薪年假？","expected_tools":["search_knowledge_base"],"refusal":true},
+    {"id":"U03","category":"unsupported","question":"公司医保报销比例具体是多少？","expected_tools":["search_knowledge_base"],"refusal":true},
+    {"id":"C01","category":"calculator","question":"帮我计算 123 * 456","expected_tools":["calculator"],"expected_calculation":56088},
+    {"id":"C02","category":"calculator","question":"帮我计算 999 + 888","expected_tools":["calculator"],"expected_calculation":1887},
+    {"id":"C03","category":"calculator","question":"请计算 1000 - 333","expected_tools":["calculator"],"expected_calculation":667},
+    {"id":"H01","category":"chat","question":"你好，请介绍一下你自己。","expected_tools":[]},
+    {"id":"H02","category":"chat","question":"谢谢你的帮助，祝你今天愉快！","expected_tools":[]},
+    {"id":"X01","category":"mixed_tools","question":"根据文档，Project Cedar 每位员工每月健康补贴是多少元？请用 calculator 计算 3 位员工一个月的补贴总额。","expected_tools":["search_knowledge_base","calculator"],"expected_calculation":2193,"facts":[{"document":"web-demo-policy.pdf","page":1,"quote":"每位员工每月 731 元","answer_pattern":"731元"}]}
+  ]
+}

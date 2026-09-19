@@ -1,0 +1,25 @@
+.env
+.env.*
+!.env.example
+!.env.production.example
+.cache/
+data/
+.venv/
+__pycache__/
+*.pyc
+# 本地企业文件及其提取结果，禁止纳入版本管理。
+samples/private/
+# 本地验收报告和临时测试产物不进入公开仓库。
+output/
+tmp/
+tool_calling_test_results.txt
+samples/*.json
+evaluation/reports/
+data/vector-db/
+.cache/embeddings/
+frontend/node_modules/
+frontend/dist/
+frontend/test-results/
+frontend/playwright-report/
+frontend/.env.local
+frontend/.env.*.local

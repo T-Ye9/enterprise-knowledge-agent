@@ -1,0 +1,16 @@
+# 仅包含后端源码、依赖清单和两份明确的公开样例。
+**
+!Dockerfile
+!requirements.txt
+!requirements.lock.txt
+!app/
+!app/**
+!samples/
+!samples/demo-company-policy.pdf
+!samples/web-demo-policy.pdf
+**/__pycache__/
+**/*.pyc
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
