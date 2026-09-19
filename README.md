@@ -4,6 +4,7 @@
 
 已选本地部署方案：Railway 后端（至少 1GiB）与 Render 静态前端；尚未进行外部部署。方案比较与上线清单见
 [stage-16-deployment.md](docs/stages/stage-16-deployment.md)。
+Railway 首次部署操作与全部环境变量见 [RAILWAY_DEPLOY.md](docs/RAILWAY_DEPLOY.md)。
 生产配置模板为 `.env.production.example`，不要覆盖现有 .env 密钥。
 生产模式启动时检查密钥、明确 CORS 和可写存储目录；公开 Demo 关闭上传，并通过 `BOOTSTRAP_DEMO_KNOWLEDGE_BASE=true` 在启动时重建两份预置公开 PDF 的知识库。
 前端构建需要同时设置 VITE_ALLOW_DOCUMENT_UPLOAD=false，隐藏上传入口；后端仍独立拒绝上传。
